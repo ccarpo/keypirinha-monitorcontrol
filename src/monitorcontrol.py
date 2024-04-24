@@ -10,14 +10,15 @@ import urllib.parse
 import urllib.request
 import http.client
 import os
+from monitorcontrol import get_monitors
 
 
-class bitwarden(kp.Plugin):
+class monitorcontrol(kp.Plugin):
 
-    ITEMCAT_RESULT = kp.ItemCategory.USER_BASE + 2
-    ITEMCAT_LOCK = kp.ItemCategory.USER_BASE + 3
-    ITEMCAT_UNLOCK = kp.ItemCategory.USER_BASE + 4
-    CREDENTIAL_RETRIVAL = "dynamic"
+    ITEMCAT_RESULT = kp.ItemCategory.USER_BASE + 1
+    MONITOR_ITEMS = kp.ItemCategory.USER_BASE + 2
+
+    structure = {}
 
     """
     One-line description of your plugin.
@@ -49,201 +50,111 @@ class bitwarden(kp.Plugin):
         super().__init__()
 
     def on_start(self):
+        # load ini file
         settings = self.load_settings()
-        self.CREDENTIAL_RETRIVAL = settings.get_stripped(
-            "credential_retrival",
-            section="bitwarden",
-            fallback="static")
-        self.API_URL = settings.get_stripped(
-            "bitwarden_api",
-            section="bitwarden",
-            fallback="http://localhost:8087")   
-        #register actions
-        actions = [
-            self.create_action(
-                name=self.ACTION_COPY_USER,
-                label="Copy Username",
-                short_desc="Copy username to clipboard"),
-            self.create_action(
-                name=self.ACTION_COPY_PASSWORD,
-                label="Copy Password",
-                short_desc="Copy password to clipboard"),
-            self.create_action(
-                name=self.ACTION_COPY_TOPT,
-                label="Copy One Time Token",
-                short_desc="Copy One Time Token to clipboard"),
-            self.create_action(
-                name=self.ACTION_OPEN_URL,
-                label="Open URL",
-                short_desc="Open the URL in clipboard")]
-        self.set_actions(self.ITEMCAT_RESULT, actions)
-        # self.set_actions(self.ITEMCAT_UNLOCK, [self.create_action(
-        #     name=self.ACTION_UNLOCK,
-        #     label="Unlock Bitwarden",
-        #     short_desc="Unlock Bitwarden Vault with Password")])
+        # get all monitors defined in the ini file
+        monitor_sections = [ section.split("/")[0] for section in settings.sections() if section.lower().startswith("monitor/") ]
+        
+        data = {}
 
+        for section in monitor_sections:
+            monitor_id = section[8:]
+
+            data[monitor_id] = {}
+
+            monitors = settings.keys(section)
+            for monitor_key in monitors:
+                monitor_string = settings.get(monitor_key, section=section)
+                if not len(monitor_string):
+                    self.warn(
+                        'Monitor variable "{}" does not have "string" value (or is empty). Ignored.'.format(
+                            monitor_key
+                        )
+                    )
+                    continue
+
+                data[monitor_id][monitor_key] = monitor_string
+
+        self.generate_folder_structure(data) 
+
+
+       
     def on_catalog(self):
-        # if the catalgo should be prefilled
         catalog = []
-        if self.CREDENTIAL_RETRIVAL == "static":
-            print("build catalog")
-            # call api. 
-            if kp.should_terminate():
-                return
-            #fill catalog
-            try: 
-                opener = kpnet.build_urllib_opener()
-                with opener.open(self.API_URL+"/list/object/items", timeout=30,) as conn:
-                    response = conn.read()
-                #get objects.
-                results = self._parse_api_response(response)
-
-                for result in results: 
-                    #print(result)
-                    login = result.get("login", {})
-                    if (result["type"] == 1): #website credentials
-                        catalog.append(self.create_item(
-                            category=self.ITEMCAT_RESULT,
-                            label=result["name"],
-                            short_desc=str(login.get("username", "-")),
-                            target=str(login.get("password","") ),
-                            args_hint=kp.ItemArgsHint.FORBIDDEN,
-                            hit_hint=kp.ItemHitHint.NOARGS,
-                        	data_bag=json.dumps(result)))
-                    # TODO implement other item types
-                    elif (result["type"] == 2): #secure note
-                        continue
-                    elif (result["type"] == 3): #card
-                        continue
-                    elif (result["type"] == 4): #identity
-                        continue
-            except urllib.error.HTTPError as exc:
-                catalog.append(self.create_error_item(
-                    label="bitwarden", short_desc=str(exc)))
-            except Exception as exc:
-                catalog.append(self.create_error_item(
-                    label="bitwarden", short_desc="Error: " + str(exc)))
-                traceback.print_exc()
-            print(f"catalog finished: {str(len(catalog))} items added")
-        # if items are fetched dynamically do nothing
-        else:
-            print("dynamic credential retrieval")
-        catalog.append(self.create_item(
-            category=self.ITEMCAT_LOCK,
-            label="Lock Bitwarden",
-            short_desc="Lock Bitwarden so that nobody can use it without a password",
-            target="lock",
-            args_hint=kp.ItemArgsHint.FORBIDDEN,
-            hit_hint=kp.ItemHitHint.NOARGS))
-        # catalog.append(self.create_item(
-        #     category=self.ITEMCAT_UNLOCK,
-        #     label="Unlock Bitwarden",
-        #     short_desc="Unlock Bitwarden so that you can retrieve passwords",
-        #     target="unlock",
-        #     args_hint=kp.ItemArgsHint.ACCEPTED,
-        #     hit_hint=kp.ItemHitHint.NOARGS))
+        # define a catalog item for each monitor
+        for monitor in self.monitor_sections:
+            catalog.append(
+                self.create_item(
+                    category=kp.ItemCategory.REFERENCE,
+                    label=monitor,
+                    short_desc=monitor,
+                    target=monitor,
+                    args_hint=kp.ItemArgsHint.ACCEPTED,
+                    hit_hint=kp.ItemHitHint.KEEPALL,
+                )
+            )
         self.set_catalog(catalog)
 
     def on_suggest(self, user_input, items_chain):
-        if len(items_chain) > 0:
+        # if nothing has been selected yet
+        if not items_chain:
             return
-        # if items are fetched dynamically
-        if self.CREDENTIAL_RETRIVAL == "dynamic":
-            #start at a length of 3
-            if len(user_input) < 3:
-                return
-            suggestions = []
-            results = []
-            sanitized_input = urllib.parse.quote(user_input)
-            try:
-                # get possible items
-                opener = kpnet.build_urllib_opener()
-                url = self.API_URL+"/list/object/items?search="+sanitized_input
-                with opener.open(url) as conn:
-                    response = conn.read()
+        # if the first item is not a monitor
+        if items_chain and (
+            items_chain[0].category() != kp.ItemCategory.REFERENCE
+            or items_chain[-1].category() != self.MONITOR_ITEMS
+        ):
+            return
+        
+        path = [node.label() for node in items_chain]
+        structure_ref = self.get_node_from_structure(path)
+        nodes = structure_ref.keys()
 
-                # get objects
-                results = self._parse_api_response(response)
-            except urllib.error.HTTPError as exc:
-                suggestions.append(self.create_error_item(
-                    label=sanitized_input, short_desc=str(exc)))
-            except Exception as exc:
-                suggestions.append(self.create_error_item(
-                    label=sanitized_input, short_desc="Error: " + str(exc)))
-                traceback.print_exc()
+        suggestions = []
 
-            # create a suggestion from api's response, if any
-            for result in results:
-                login = result.get("login", {})
-                suggestions.append(self.create_item(
-                    category=self.ITEMCAT_RESULT,
-                    label=result["name"],
-                    short_desc=str(login.get("username", "-")),
-                    target=str(login.get("password","-") ),
-                    args_hint=kp.ItemArgsHint.FORBIDDEN,
+        for node in nodes:
+            suggestions.append(
+                self.create_item(
+                    category=self.MONITOR_ITEMS,
+                    label=node,
+                    short_desc=node,
+                    target=node,
+                    args_hint=kp.ItemArgsHint.REQUIRED,
                     hit_hint=kp.ItemHitHint.NOARGS,
-                    data_bag=json.dumps(result))
                 )
+            )
 
-            # push suggestions if any
-            if suggestions:
-                self.set_suggestions(suggestions, kp.Match.ANY, kp.Sort.NONE)
+        user_input = user_input.strip()
+
+        self.set_suggestions(
+            suggestions,
+            kp.Match.ANY if not user_input else kp.Match.FUZZY,
+            kp.Sort.NONE if not user_input else kp.Sort.SCORE_DESC,
+        )
 
     def on_execute(self, item, action):
-        # lock / unlock 
-        if item.category() == self.ITEMCAT_LOCK:
-            conn = http.client.HTTPConnection("localhost", 8087)
-            payload = ''
-            headers = {}
-            conn.request("POST", "/lock", payload, headers)
-            res = conn.getresponse()
-            data = res.read()
-            return
-        # if item.category() == self.ITEMCAT_UNLOCK:
-        #     print(item.raw_args())
-        #     print(item.displayed_args())
-        #     data = {'password': item.raw_args()} 
-        #     data = json.dumps(data).encode('utf-8')
-        #     req = urllib.request.Request(self.API_URL+"/unlock", data)
-        #     req.add_header('Content-Type', 'application/json')
-        #     response = urllib.request.urlopen(req)
-        #     print(response.read().decode('utf-8'))
-        #     return
-
-        # default: copy password. other actions: copy username or TOPT, open URL in browser
-        if action and action.name() in (self.ACTION_COPY_USER,
-                                        self.ACTION_COPY_TOPT,
-                                        self.ACTION_OPEN_URL):
-            result = json.loads(item.data_bag())
-            #print(result)
-            login = result.get("login", {})
-            if action.name() == self.ACTION_OPEN_URL:
-                uris = login.get("uris",[])
-                url_entry = uris[0]
-                uri = url_entry.get("uri", "")
-                kpu.shell_execute(uri, verb='open', detect_nongui=True, api_flags=None, terminal_cmd=None, show=-1)
-            elif action.name() == self.ACTION_COPY_USER:
-                kpu.set_clipboard(login.get("username", ""))
-            elif action.name() == self.ACTION_COPY_TOPT:
-                #retrieve TOPT from API
-                opener = kpnet.build_urllib_opener()
-                url = self.API_URL+"/object/totp/"+result.get("id", "")
-                with opener.open(url) as conn:
-                    response = conn.read()
-
-                # parse response from the api
-                results = self._parse_api_response(response)
-                #print(results)
-                kpu.set_clipboard(results)
-        # default action: copy result (ACTION_COPY_PASSWORD)
-        else:
-            kpu.set_clipboard(item.target())
-
-    def _parse_api_response(self, response):
-        try:
-            json_object = json.loads(response)
-            json_data_list = json_object["data"]["data"]
-        except: 
-            return json.loads("{'name':'error'}")
-        return json_data_list
+        #set values or retrieve infos to clipboard
+        return
     
+    def generate_folder_structure(self, data):
+        self.structure = {}
+        for monitor_id in data.keys():
+            self.structure[monitor_id] = {}
+            for key, value in data[monitor_id].items():
+                self.structure[monitor_id][key] = []
+                for item in value.split(","):
+                    self.structure[monitor_id][key].append(self.create_item(
+                    category=self.ITEMCAT_RESULT,
+                    label=item.strip(),
+                    short_desc=item.strip(),
+                    target=key,
+                    args_hint=kp.ItemArgsHint.FORBIDDEN,
+                    hit_hint=kp.ItemHitHint.IGNORE,
+                ))
+        return
+    
+    def get_node_from_structure(self, path):
+        structure_ref = self.structure
+        for node in path:
+            structure_ref = structure_ref[node]
+        return structure_ref

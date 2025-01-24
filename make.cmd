@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set PACKAGE_NAME=monitorcontrol
+set PACKAGE_NAME=moncon
 set INSTALL_DIR=%APPDATA%\Keypirinha\InstalledPackages
 
 if "%1"=="" goto help

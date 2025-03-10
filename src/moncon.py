@@ -83,9 +83,16 @@ class moncon(kp.Plugin):
             # Aktuellen Status für die Beschreibung verwenden
             current_state = self.current_states.get(monitor_id, {})
             current_input = self._get_input_name(current_state.get('input', None))
-            current_brightness = current_state.get('brightness', 'Unbekannt')
+            current_brightness = current_state.get('brightness')
             
-            desc = f"Aktuell: {current_input} (Helligkeit: {current_brightness}%)"
+            # Beschreibung mit aktuellen Werten
+            desc_parts = []
+            if current_input:
+                desc_parts.append(f"Input: {current_input}")
+            if current_brightness is not None:
+                desc_parts.append(f"Helligkeit: {current_brightness}%")
+            
+            desc = ", ".join(desc_parts) if desc_parts else "Status nicht verfügbar"
             
             catalog.append(self.create_item(
                 category=kp.ItemCategory.REFERENCE,
@@ -93,7 +100,7 @@ class moncon(kp.Plugin):
                 short_desc=desc,
                 target=monitor_id,
                 args_hint=kp.ItemArgsHint.ACCEPTED,
-                hit_hint=kp.ItemHitHint.KEEPALL
+                hit_hint=kp.ItemHitHint.NOARGS
             ))
 
         self.set_catalog(catalog)
@@ -109,6 +116,7 @@ class moncon(kp.Plugin):
             suggestions = []
             
             # 1. Input-Auswahl
+            current_input = self._get_input_name(monitor_state.get('input', None))
             capabilities = monitor_state.get('capabilities', {})
             available_inputs = capabilities.get('inputs', [])
             
@@ -129,15 +137,127 @@ class moncon(kp.Plugin):
                     if input_name in configured_inputs:
                         filtered_inputs.append(input_source)
             else:
-                for input_source in available_inputs:
-                    if input_source is not None:
-                        input_name = self._get_input_name(input_source)
-                        if not input_name.startswith("0x"):
-                            filtered_inputs.append(input_source)
+                filtered_inputs = available_inputs
+            
+            # Zusätzliche Inputs aus dem Mapping hinzufügen
+            input_mapping_values = set()
+            for code, name in self.input_mapping.items():
+                if not show_all and configured_inputs:
+                    if name not in configured_inputs:
+                        continue
+                input_mapping_values.add(code)
+                if code not in [getattr(x, 'value', x) for x in filtered_inputs]:
+                    filtered_inputs.append(code)
             
             for input_source in filtered_inputs:
                 input_name = self._get_input_name(input_source)
-                if input_name:
+                if input_name and not input_name.startswith("0x"):
+                    suggestions.append(
+                        self.create_item(
+                            category=self.ITEMCAT_RESULT,
+                            label=f"Input: {input_name}",
+                            short_desc=f"Wechsle zu {input_name}" + (" (Aktuell)" if input_name == current_input else ""),
+                            target=f"{monitor_id}/input/{input_source.value if isinstance(input_source, InputSource) else input_source}",
+                            args_hint=kp.ItemArgsHint.FORBIDDEN,
+                            hit_hint=kp.ItemHitHint.NOARGS
+                        )
+                    )
+            
+            # 2. Helligkeit
+            current_brightness = monitor_state.get('brightness')
+            if current_brightness is not None:
+                for value in [0, 25, 50, 75, 100]:
+                    suggestions.append(
+                        self.create_item(
+                            category=self.ITEMCAT_RESULT,
+                            label=f"Helligkeit: {value}%",
+                            short_desc=f"Helligkeit auf {value}% setzen" + (" (Aktuell)" if value == current_brightness else ""),
+                            target=f"{monitor_id}/helligkeit/{value}",
+                            args_hint=kp.ItemArgsHint.FORBIDDEN,
+                            hit_hint=kp.ItemHitHint.NOARGS
+                        )
+                    )
+            
+            # 3. Kontrast
+            current_contrast = monitor_state.get('contrast')
+            if current_contrast is not None:
+                for value in [0, 25, 50, 75, 100]:
+                    suggestions.append(
+                        self.create_item(
+                            category=self.ITEMCAT_RESULT,
+                            label=f"Kontrast: {value}%",
+                            short_desc=f"Kontrast auf {value}% setzen" + (" (Aktuell)" if value == current_contrast else ""),
+                            target=f"{monitor_id}/kontrast/{value}",
+                            args_hint=kp.ItemArgsHint.FORBIDDEN,
+                            hit_hint=kp.ItemHitHint.NOARGS
+                        )
+                    )
+            
+            # 4. Lautstärke
+            current_volume = monitor_state.get('volume')
+            if current_volume is not None:
+                for value in [0, 25, 50, 75, 100]:
+                    suggestions.append(
+                        self.create_item(
+                            category=self.ITEMCAT_RESULT,
+                            label=f"Lautstärke: {value}%",
+                            short_desc=f"Lautstärke auf {value}% setzen" + (" (Aktuell)" if value == current_volume else ""),
+                            target=f"{monitor_id}/volume/{value}",
+                            args_hint=kp.ItemArgsHint.FORBIDDEN,
+                            hit_hint=kp.ItemHitHint.NOARGS
+                        )
+                    )
+            
+            # 5. Preset
+            settings = self.load_settings()
+            presets = settings.keys(section="presets")
+            for preset in presets:
+                suggestions.append(
+                    self.create_item(
+                        category=self.ITEMCAT_RESULT,
+                        label=f"Preset: {preset.capitalize()}",
+                        short_desc=f"Aktiviere {preset}-Modus",
+                        target=f"{monitor_id}/preset/{preset}",
+                        args_hint=kp.ItemArgsHint.FORBIDDEN,
+                        hit_hint=kp.ItemHitHint.NOARGS
+                    )
+                )
+            
+            # Nur setzen wenn wir tatsächlich Vorschläge haben
+            if suggestions:
+                self.set_suggestions(suggestions)
+        
+        # Untermenüs für Input
+        elif items_chain[-1].target().endswith('/input'):
+            monitor_id = items_chain[-1].target().split('/')[0]
+            monitor_state = self.current_states.get(monitor_id, {})
+            
+            # Input-Liste filtern
+            capabilities = monitor_state.get('capabilities', {})
+            available_inputs = capabilities.get('inputs', [])
+            
+            settings = self.load_settings()
+            show_all = settings.get_bool("show_all_inputs", section="main", fallback=True)
+            configured_inputs = settings.get_stripped(
+                "inputs",
+                section=f"monitor/{monitor_id}",
+                fallback=""
+            )
+            
+            filtered_inputs = []
+            if configured_inputs and not show_all:
+                configured_inputs = [i.strip().upper() for i in configured_inputs.split(",")]
+                for input_source in available_inputs:
+                    input_name = self._get_input_name(input_source)
+                    if input_name in configured_inputs:
+                        filtered_inputs.append(input_source)
+            else:
+                filtered_inputs = available_inputs
+            
+            suggestions = []
+            for input_source in filtered_inputs:
+                input_name = self._get_input_name(input_source)
+                if input_name and not input_name.startswith("0x"):
                     suggestions.append(
                         self.create_item(
                             category=self.ITEMCAT_RESULT,
@@ -149,50 +269,31 @@ class moncon(kp.Plugin):
                         )
                     )
             
-            # 2. Helligkeit/Kontrast
-            for control in ["Helligkeit", "Kontrast"]:
-                current_value = monitor_state.get(control.lower(), 'Unbekannt')
-                suggestions.append(
-                    self.create_item(
-                        category=self.ITEMCAT_RESULT,
-                        label=control,
-                        short_desc=f"Aktuell: {current_value}%",
-                        target=f"{monitor_id}/{control.lower()}",
-                        args_hint=kp.ItemArgsHint.REQUIRED,
-                        hit_hint=kp.ItemHitHint.NOARGS
-                    )
-                )
-            
-            # 3. Audio
-            suggestions.append(
-                self.create_item(
-                    category=self.ITEMCAT_RESULT,
-                    label="Lautstärke",
-                    short_desc=f"Aktuell: {monitor_state.get('volume', 'Unbekannt')}%",
-                    target=f"{monitor_id}/volume",
-                    args_hint=kp.ItemArgsHint.REQUIRED,
-                    hit_hint=kp.ItemHitHint.NOARGS
-                )
-            )
-            
-            # 4. Preset-Modi
-            suggestions.append(
-                self.create_item(
-                    category=self.ITEMCAT_RESULT,
-                    label="Preset",
-                    short_desc="Voreinstellungen (Gaming, Film, Text, Nacht)",
-                    target=f"{monitor_id}/preset",
-                    args_hint=kp.ItemArgsHint.FORBIDDEN,
-                    hit_hint=kp.ItemHitHint.NOARGS
-                )
-            )
-            
             self.set_suggestions(suggestions)
         
-        # Untermenüs
+        # Untermenüs für Helligkeit/Kontrast/Lautstärke
         elif items_chain[-1].target().endswith(('/helligkeit', '/kontrast', '/volume')):
-            values = [0, 25, 50, 75, 100]
+            monitor_id = items_chain[-1].target().split('/')[0]
             control_type = items_chain[-1].target().split('/')[-1]
+            
+            # Aktuelle Werte aus dem Monitor-Status holen
+            monitor_state = self.current_states.get(monitor_id, {})
+            current_value = None
+            if control_type == 'helligkeit':
+                current_value = monitor_state.get('brightness')
+            elif control_type == 'kontrast':
+                current_value = monitor_state.get('contrast')
+            elif control_type == 'volume':
+                current_value = monitor_state.get('volume')
+            
+            # Standard-Schritte
+            values = [0, 25, 50, 75, 100]
+            
+            # Wenn es einen aktuellen Wert gibt, diesen auch hinzufügen
+            if current_value is not None and current_value not in values:
+                values.append(current_value)
+                values.sort()
+            
             suggestions = [
                 self.create_item(
                     category=self.ITEMCAT_RESULT,
@@ -205,6 +306,7 @@ class moncon(kp.Plugin):
             ]
             self.set_suggestions(suggestions)
         
+        # Untermenüs
         elif items_chain[-1].target().endswith('/preset'):
             settings = self.load_settings()
             presets = settings.keys(section="presets")
@@ -319,7 +421,6 @@ class moncon(kp.Plugin):
     def _update_monitor_states(self):
         """Aktualisiert den Status aller Monitore"""
         self.dbg("Starte Monitor-Status Update")
-        self.current_states = {}
         
         if not self.monitors:
             self.warn("Keine Monitore verfügbar für Status-Update")
@@ -337,6 +438,7 @@ class moncon(kp.Plugin):
                     except Exception as e:
                         self.dbg(f"Fehler beim Lesen der Capabilities: {str(e)}")
                         monitor_id = f"Monitor{idx}"
+                        caps = {}
                     
                     # Einzelne Operationen mit Try/Except
                     try:
@@ -367,13 +469,43 @@ class moncon(kp.Plugin):
                         self.dbg(f"Fehler beim Lesen der Lautstärke: {str(e)}")
                         volume = None
 
+                    # Verfügbare Inputs aus Capabilities extrahieren
+                    if 'inputs' not in caps:
+                        try:
+                            available_inputs = []
+                            for code in range(1, 32):  # Typische Range für Input-Codes
+                                try:
+                                    if monitor.get_vcp_feature(0x60, code):  # 0x60 ist der VCP-Code für Input Source
+                                        available_inputs.append(code)
+                                except:
+                                    pass
+                            caps['inputs'] = available_inputs
+                        except Exception as e:
+                            self.dbg(f"Fehler beim Ermitteln der verfügbaren Inputs: {str(e)}")
+                            caps['inputs'] = []
+
                 monitor_info = {
                     'input': input_source,
                     'brightness': luminance,
                     'contrast': contrast,
                     'volume': volume,
-                    'capabilities': caps if 'caps' in locals() else None
+                    'capabilities': caps
                 }
+                
+                # Aktuellen Status mit vorherigem Status zusammenführen
+                if monitor_id in self.current_states:
+                    old_state = self.current_states[monitor_id]
+                    # Nur gültige neue Werte übernehmen
+                    monitor_info = {
+                        key: value if value is not None else old_state.get(key)
+                        for key, value in monitor_info.items()
+                    }
+                    # Capabilities zusammenführen
+                    if 'capabilities' in old_state:
+                        old_caps = old_state['capabilities']
+                        if 'inputs' in old_caps and not caps.get('inputs'):
+                            caps['inputs'] = old_caps['inputs']
+                
                 self.current_states[monitor_id] = monitor_info
                 self.dbg(f"Monitor {monitor_id} Status erfolgreich aktualisiert")
                 
